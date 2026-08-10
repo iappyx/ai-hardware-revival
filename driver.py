@@ -65,8 +65,29 @@ def open_device(backend_hint=True):
         usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT and
         usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK)
     shadow = [0] * 0x80; ostat = {'w': 0, 'r': 0}
+    _flush_pipes()
     return dict(ep_in=ep_in.bEndpointAddress if ep_in else 0,
                 ep_out=ep_out.bEndpointAddress if ep_out else 0)
+
+def _flush_pipes():
+    """Clear a stale state left by a previous scan: reset endpoint halts and drain any
+    bytes still queued on the bulk-IN pipe. This is what makes a 2nd scan reliable -
+    otherwise leftover data corrupts the next calibration read."""
+    for ep in (ep_in, ep_out):
+        try:
+            if ep is not None: dev.clear_halt(ep.bEndpointAddress)
+        except Exception:
+            pass
+    if ep_in is None:
+        return
+    # drain: read until the pipe is empty (short timeout), bounded so we never hang
+    for _ in range(64):
+        try:
+            c = dev.read(ep_in.bEndpointAddress, 0xf000, timeout=120)
+        except Exception:
+            break
+        if not c:
+            break
 
 def close_device():
     global dev

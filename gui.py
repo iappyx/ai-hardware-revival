@@ -119,16 +119,17 @@ class App:
             base = os.path.join(os.path.expanduser(outdir), name)
             use = fmts if imaging.HAVE_PIL else ['raw']
             written = imaging.export(raw, meta, base, use)
-            driver.close_device()
             self.q.put(('log', 'saved:'))
             for p in written:
                 self.q.put(('log', '  ' + os.path.basename(p)))
             self.q.put(('preview', (raw, meta)))
-            self.q.put(('done', None))
         except Exception as e:
             self.q.put(('log', 'ERROR: %s' % e))
             for ln in traceback.format_exc().splitlines()[-4:]:
                 self.q.put(('log', ln))
+        finally:
+            try: driver.close_device()
+            except Exception: pass
             self.q.put(('done', None))
 
     def _pump(self):
