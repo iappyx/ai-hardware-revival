@@ -98,7 +98,7 @@ def close_device():
 
 _MODEMAP = {'color': 2, 'colour': 2, 'gray': 1, 'grey': 1, 'lineart': 0, 'bw': 0}
 
-def scan(dpi=300, mode='color', depth=8, progress=None):
+def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
     """Run a full native scan. Returns (raw_bytes, meta). mode: color|gray|lineart."""
     global _PROGRESS
     if progress is not None: _PROGRESS = progress
@@ -146,7 +146,10 @@ def scan(dpi=300, mode='color', depth=8, progress=None):
     emit_motor_tables(dpi, exposure=motor_expo, travel=travel, lines=lines)
     feed = emit_scan_program(dpi, dpi, width, lines, m, depth=depth)
     log('scanning... (streaming %d bytes)' % target)
+    pmeta = dict(width=width, channels=3 if color else 1, depth=depth,
+                 lineart=1 if lineart else 0, total_lines=lines)
     image = bytearray(); t0 = time.monotonic(); wd = max(150.0, target / 2.0e5)
+    last_prev = t0
     while len(image) < target and time.monotonic() - t0 < wd:
         chunk = _patient_bulk_in(min(0x10000, target - len(image)), quiet_s=1.2)
         if not chunk:
@@ -154,6 +157,11 @@ def scan(dpi=300, mode='color', depth=8, progress=None):
             continue
         image += bytes(chunk)
         if progress: progress('  %d%% (%d / %d)' % (100 * len(image) // target, len(image), target))
+        # live preview: throttled so we never stall the read pipe for long
+        if preview and time.monotonic() - last_prev > 2.0 and len(image) > stride * 8:
+            try: preview(image, pmeta)
+            except Exception: pass
+            last_prev = time.monotonic()
     tq = time.monotonic()
     while time.monotonic() - tq < 20.0:
         if move_done(): break

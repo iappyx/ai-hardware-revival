@@ -159,3 +159,70 @@ def export(raw, meta, out_base, formats):
             img.convert('RGB' if img.mode not in ('L','1') else img.mode).save(path, pil)
         written.append(path)
     return written
+
+
+def preview_image(raw, meta, target_w=460):
+    """Fast, rough live-preview thumbnail of the lines received so far, rendered
+    into the FULL page frame so the aspect ratio is correct and the image builds
+    up from the bottom (matching the scan direction). Heavily subsampled to stay
+    fast enough not to stall the read pipe."""
+    if not HAVE_PIL or not HAVE_NP:
+        return None
+    import numpy as np
+    from PIL import Image
+    W = meta['width']; ch = meta.get('channels', 3); depth = meta.get('depth', 8)
+    lineart = meta.get('lineart', 0)
+    total = meta.get('total_lines') or 0
+
+    # bytes per line
+    if lineart or depth == 1:
+        stride = (W + 7) // 8
+    else:
+        stride = W * ch * (2 if depth == 16 else 1)
+    L = len(raw) // stride
+    if L < 2:
+        return None
+    Hfull = max(total, L)
+    step = max(1, Hfull // 700)          # scale off FULL height -> stable, no rescaling as it grows
+    cstep = max(1, W // target_w)
+    Lsub = max(1, L // step)
+
+    # decode the partial rows [0:L] (subsampled) into an 8-bit array `part`
+    if lineart or depth == 1:
+        rowb = stride
+        a = np.frombuffer(raw, np.uint8, count=L * rowb).reshape(L, rowb)[:Lsub * step:step]
+        part = (np.unpackbits(a, axis=1)[:, :W][:, ::cstep] * 255).astype(np.uint8)
+        color = False
+    elif ch == 1:
+        if depth == 16:
+            d = np.frombuffer(raw, '<u2', count=L * W).reshape(L, W)[:Lsub*step:step][:, ::cstep].astype(np.float32) / 257.0
+        else:
+            d = np.frombuffer(raw, np.uint8, count=L * W).reshape(L, W)[:Lsub*step:step][:, ::cstep].astype(np.float32)
+        part = np.clip(d, 0, 255).astype(np.uint8)
+        color = False
+    else:
+        if depth == 16:
+            a = np.frombuffer(raw, '<u2', count=L * W * 3).reshape(L, W * 3)[:Lsub*step:step].astype(np.float32) / 65535.0
+        else:
+            a = np.frombuffer(raw, np.uint8, count=L * stride).reshape(L, W * 3)[:Lsub*step:step].astype(np.float32) / 255.0
+        img = np.stack([a[:, 0::3][:, ::cstep], a[:, 1::3][:, ::cstep], a[:, 2::3][:, ::cstep]], -1)
+        s = np.clip(img @ np.array(_C, np.float32).T, 0, 1)
+        s = np.where(s <= 0.0031308, 12.92 * s, 1.055 * np.power(s, 1 / 2.4) - 0.055)
+        part = (s * 255).astype(np.uint8)
+        color = True
+
+    Lsub = part.shape[0]
+    Wsub = part.shape[1]
+    Hsub = max(Lsub, Hfull // step)
+    # full-page frame, scanned rows at the TOP in raw order; ROTATE_180 then puts
+    # them at the BOTTOM (correct final orientation) so it fills upward.
+    if color:
+        frame = np.zeros((Hsub, Wsub, 3), np.uint8)
+    else:
+        frame = np.zeros((Hsub, Wsub), np.uint8)
+    frame[:Lsub] = part
+    im = Image.fromarray(frame, 'RGB' if color else 'L').transpose(Image.ROTATE_180)
+    w, h = im.size
+    if w != target_w:
+        im = im.resize((target_w, max(1, h * target_w // w)))
+    return im

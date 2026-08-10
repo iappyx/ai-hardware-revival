@@ -113,9 +113,16 @@ class App:
         try:
             self.q.put(('log', 'opening scanner...'))
             driver.open_device()
+            def _prev(rawbuf, pmeta):
+                try:
+                    im = imaging.preview_image(rawbuf, pmeta)
+                    if im is not None: self.q.put(('preview_img', im))
+                except Exception:
+                    pass
             with contextlib.redirect_stdout(_QW(self.q)):
                 raw, meta = driver.scan(dpi=dpi, mode=mode, depth=depth,
-                                        progress=lambda s: self.q.put(('prog', s)))
+                                        progress=lambda s: self.q.put(('prog', s)),
+                                        preview=_prev)
             base = os.path.join(os.path.expanduser(outdir), name)
             use = fmts if imaging.HAVE_PIL else ['raw']
             written = imaging.export(raw, meta, base, use)
@@ -143,6 +150,8 @@ class App:
                     if '%' in payload:
                         try: self.prog['value'] = int(payload.split('%')[0].split()[-1])
                         except Exception: pass
+                elif kind == 'preview_img':
+                    self._show_image(payload)
                 elif kind == 'preview':
                     self._preview(*payload)
                 elif kind == 'done':
@@ -153,17 +162,23 @@ class App:
             pass
         self.root.after(100, self._pump)
 
-    def _preview(self, raw, meta):
-        if not imaging.HAVE_PIL:
-            return
+    def _show_image(self, im):
         try:
-            from PIL import Image, ImageTk
-            im = imaging.to_image(raw, meta, bits=8).convert('RGB')
+            from PIL import ImageTk
+            im = im.convert('RGB')
             w = self.canvas.winfo_width() or 400
             h = self.canvas.winfo_height() or 400
             im.thumbnail((max(w, 100), max(h, 100)))
             self._tkimg = ImageTk.PhotoImage(im)
             self.canvas.config(image=self._tkimg, text='')
+        except Exception as e:
+            self._log('preview failed: %s' % e)
+
+    def _preview(self, raw, meta):
+        if not imaging.HAVE_PIL:
+            return
+        try:
+            self._show_image(imaging.to_image(raw, meta, bits=8))
         except Exception as e:
             self._log('preview failed: %s' % e)
 
