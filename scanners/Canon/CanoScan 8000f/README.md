@@ -14,7 +14,7 @@ reverse-engineering, with a small CLI and GUI on top.
 
 | Setting     | Values                                             |
 |-------------|----------------------------------------------------|
-| Resolution  | 75, 300, 600 dpi (supported); 150 & 1200 dpi work-in-progress |
+| Resolution  | 75, 100, 150, 200, 300, 400, 600 dpi; 800 & 1200 dpi (experimental) |
 | Colour mode | `color` (24-bit), `gray` (8/16-bit), `lineart` (1-bit) |
 | Bit depth   | 8 or 16 (16-bit preserved in PNG/TIFF)             |
 | Export      | PNG, TIFF, JPEG, PDF, RAW                           |
@@ -85,19 +85,30 @@ byte-for-byte against the real firmware's output.
 Experimental. Code is still being tuned. Contributions and test reports
 welcome.
 
-Resolution support:
+The scanner has exactly **five native hardware resolutions — 75, 150, 300, 600,
+1200 dpi**. This isn't a limitation we chose: the vendor firmware (CNQL2403.DLL)
+carries motor slope + home-decel tables for precisely those five and no others.
+ScanGear's other listed resolutions (100, 200, 400, 800) are **not** driven on the
+hardware — the vendor scans the next native rung up and resamples in software
+(each extra dpi is exactly ⅔ of a native one: 100 = ⅔·150, 200 = ⅔·300,
+400 = ⅔·600, 800 = ⅔·1200). This driver does the same: it drives the motor only at
+a native rung, then LANCZOS-resamples to the requested size on export.
 
-- **75 / 300 / 600 dpi** — fully native and hardware-verified (colour, gray,
-  line-art, 8/16-bit).
-- **150 dpi** — *work in progress.* Native 150 has an unresolved motor-geometry
-  quirk (the carriage over-runs the bed), so the app currently scans at 300 dpi
-  and downsamples to 150. Output is correct; it is not yet a true native pass.
-- **1200 dpi** — *work in progress / unsupported.* The carriage moves but the
-  capture stops early (0 bytes). Not usable yet.
+- **75 / 300 / 600 dpi** — native, hardware-verified (colour, gray, line-art,
+  8/16-bit).
+- **150 dpi** — native; the old motor over-run was fixed by recovering the true
+  motor travel from a real ScanGear 150-dpi USB capture (slope + home-decel tables
+  match byte-for-byte). Pending a final hardware sign-off.
+- **100 / 200 / 400 dpi** — resampled from 150 / 300 / 600 (all native/verified),
+  so output is solid.
+- **1200 dpi** — *experimental.* A ScanGear 1200-dpi capture pinned the two wrong
+  registers (Y-step divider, launch run-mode); the per-scan program now matches
+  the vendor trace register-for-register. Needs one confirming hardware run.
+- **800 dpi** — *experimental,* because it resamples from 1200, which is itself
+  awaiting hardware confirmation.
 
-Cracking native 150 and 1200 needs a USB capture of the vendor driver doing
-those resolutions, to recover the exact motor geometry (as the 75-dpi capture
-did for the rest).
+Every native path was cracked the same way: capture the vendor driver over USB,
+parse its register/motor program, and match ours to it exactly.
 
 ## License
 

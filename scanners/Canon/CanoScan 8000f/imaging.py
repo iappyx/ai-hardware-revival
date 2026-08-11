@@ -141,13 +141,25 @@ def export(raw, meta, out_base, formats):
         else:
             if im8 is None: im8 = to_image(raw, meta, bits=8)
             img = im8
+        # Resample to the requested output size. `out_width`/`out_lines` (exact
+        # target dims) are set when the requested dpi is a non-native ScanGear
+        # resolution scanned at the next native rung (e.g. 400 dpi scanned at 600
+        # then resampled ×2/3) - this is how the vendor produces those dpis.
+        # `downscale` (integer factor) is the older path, still honoured.
+        from PIL import Image as _I
+        ow = meta.get('out_width'); ol = meta.get('out_lines')
         ds = meta.get('downscale', 1)
-        if ds and ds > 1 and img.mode != '1':
-            from PIL import Image as _I
-            img = img.resize((max(1, img.width // ds), max(1, img.height // ds)), _I.LANCZOS)
-        elif ds and ds > 1:  # 1-bit: downscale via L then re-threshold
-            from PIL import Image as _I
-            img = img.convert('L').resize((max(1, img.width // ds), max(1, img.height // ds)), _I.LANCZOS).convert('1')
+        if ow and ol:
+            tw, th = int(ow), int(ol)
+        elif ds and ds > 1:
+            tw, th = max(1, img.width // ds), max(1, img.height // ds)
+        else:
+            tw = th = None
+        if tw and (tw, th) != (img.width, img.height):
+            if img.mode == '1':   # 1-bit: resample in L, then re-threshold
+                img = img.convert('L').resize((tw, th), _I.LANCZOS).convert('1')
+            else:
+                img = img.resize((tw, th), _I.LANCZOS)
         if pil == 'JPEG' and img.mode == '1': img = img.convert('L')
         if pil == 'PDF' and img.mode not in ('RGB', 'L', '1'): img = img.convert('RGB')
         kw = {'dpi': (dpi, dpi)}

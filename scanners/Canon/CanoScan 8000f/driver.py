@@ -26,6 +26,7 @@ REQ_REG, REQ_BUF = 0x0c, 0x04
 V_SETADDR, V_WRVAL, V_RDREG, V_GPIO, V_BUF = 0x83, 0x85, 0x84, 0x8a, 0x82
 
 GAIN_K = 210.0
+TRAVEL_STEPS = 1310   # OEM imaging-move carriage travel (steps); see scan()
 _NATIVE = {'pwm': 800}
 
 # module-level device state (single scanner)
@@ -105,23 +106,41 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
     m = _MODEMAP.get(str(mode).lower(), 2)
     lineart = (m == 0); color = (m == 2)
     if lineart: depth = 1
-    # 150 dpi has an unresolved native motor-geometry quirk (the carriage over-runs the bed).
-    # Until it's cracked, scan 150 through the proven 300-dpi path and downsample 2x on export
-    # -> clean, correct 150-dpi output with no risk to the carriage.
     requested_dpi = dpi
+    # Native hardware resolutions are 75/150/300/600/1200 — the vendor's motor
+    # generator (CNQL2403.DLL) has slope + home-decel tables for *exactly* these.
+    # ScanGear's other listed resolutions (100/200/400/800) are not driven on the
+    # hardware; it scans the next native rung up and resamples in software. Each is
+    # 2/3 of a native rung: 100=⅔·150, 200=⅔·300, 400=⅔·600, 800=⅔·1200. We do the
+    # same — drive the hardware natively, then LANCZOS-resample to the requested
+    # size on export. (Driving the motor at a non-native rate has no tail table and
+    # would over-run the carriage, the same failure mode as the old native-150 bug.)
+    _RESAMPLE_FROM = {100: 150, 200: 300, 400: 600, 800: 1200}
+    out_width = out_lines = None
+    if dpi in _RESAMPLE_FROM:
+        out_width = int(round(620 * dpi / 75.0))
+        out_lines = int(round(876 * dpi / 75.0))
+        dpi = _RESAMPLE_FROM[dpi]          # program the hardware at the native rung
     downscale = 1
-    if dpi == 150:
-        dpi = 300; downscale = 2
     width = int(round(620 * dpi / 75.0))
     lines = int(round(876 * dpi / 75.0))
     expo  = 0x5400 if dpi >= 1200 else 0x2a00
     motor_expo = expo
-    travel = motor_tables.imaging_travel(dpi, exposure=motor_expo)
+    # Motor travel = the OEM geometry value (~1310 steps), confirmed against a real
+    # ScanGear 150-dpi USB capture: its slope + home-decel tail are byte-exact with
+    # build_slope(dpi, travel=TRAVEL_STEPS) / build_hometail(dpi). Do NOT reduce it -
+    # the home-decel tail is a fixed ramp that assumes the carriage stops at this
+    # position; a shorter travel makes the tail over-drive the carriage past home.
+    travel = TRAVEL_STEPS
     if lineart:   stride = (width + 7) // 8
     elif color:   stride = width * 3 * (2 if depth == 16 else 1)
     else:         stride = width * (2 if depth == 16 else 1)
     target = lines * stride
-    log('scan %d dpi  %s  %d-bit  ->  %dx%d  (%d bytes)' % (dpi, mode, depth, width, lines, target))
+    if out_width:
+        log('scan %d dpi (native %d + resample)  %s  %d-bit  ->  %dx%d px out  (%d bytes captured)'
+            % (requested_dpi, dpi, mode, depth, out_width, out_lines, target))
+    else:
+        log('scan %d dpi  %s  %d-bit  ->  %dx%d  (%d bytes)' % (dpi, mode, depth, width, lines, target))
 
     native_init()
     _NATIVE['pwm'] = native_warmup()
@@ -150,11 +169,20 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
                  lineart=1 if lineart else 0, total_lines=lines)
     image = bytearray(); t0 = time.monotonic(); wd = max(150.0, target / 2.0e5)
     last_prev = t0
+    # Read in 512 KB bands, matching the vendor driver (its capture arms bulk-IN in
+    # fixed 0x80000 sections, one continuous motor GO). At 1200 dpi (417 MB, slow
+    # fine-step motor) our old 64 KB bands could not drain the ASIC's SDRAM image
+    # buffer fast enough between re-arms: it overflowed, the chip halted the pipeline
+    # ~40% through, and the scan stopped short (recognisable-but-stretched partial
+    # image, and the status LED left flickering in the halted state).
+    empties = 0
     while len(image) < target and time.monotonic() - t0 < wd:
-        chunk = _patient_bulk_in(min(0x10000, target - len(image)), quiet_s=1.2)
+        chunk = _patient_bulk_in(min(0x80000, target - len(image)), quiet_s=2.0)
         if not chunk:
-            if time.monotonic() - t0 > 3: break
+            empties += 1
+            if empties >= 3 and time.monotonic() - t0 > 3: break
             continue
+        empties = 0
         image += bytes(chunk)
         if progress: progress('  %d%% (%d / %d)' % (100 * len(image) // target, len(image), target))
         # live preview: throttled so we never stall the read pipe for long
@@ -168,7 +196,9 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
         time.sleep(0.05)
     wr(0x02, 0x00)
     _reactive_home_quiet()
+    teardown()          # clear scan-mode bits so the ASIC idles cleanly (stops the status-LED flicker)
     meta = dict(dpi=requested_dpi, scandpi=dpi, downscale=downscale,
+                out_width=out_width, out_lines=out_lines,
                 width=width, lines=lines, channels=3 if color else 1,
                 depth=depth, lineart=1 if lineart else 0, stride=stride, mode=mode)
     log('done: %d bytes' % len(image))
@@ -266,12 +296,17 @@ def _patient_bulk_in(size, quiet_s):
     arm=bytes([0,0,0x82,0, size&0xff,(size>>8)&0xff,(size>>16)&0xff,(size>>24)&0xff])
     try: dev.ctrl_transfer(0x40,REQ_BUF,V_BUF,0,arm,timeout=2000)
     except Exception: return b''
-    out=b''; last=time.monotonic()
+    out=bytearray(); last=time.monotonic()
+    # Read large chunks (up to the whole 512 KB band per dev.read). libusb splits it
+    # into USB packets internally, so this is ONE Python/pyusb round-trip instead of
+    # ~9 at 0xf000 - the actual drain-rate lever. At 1200 dpi the old 0xf000 reads
+    # could not empty the ASIC's SDRAM ring fast enough (Python per-read overhead),
+    # so it backed up and the chip halted ~40% in.
     while len(out)<size and time.monotonic()-last<quiet_s:
-        try: c=dev.read(ep_in.bEndpointAddress, min(size-len(out),0xf000), timeout=800)
+        try: c=dev.read(ep_in.bEndpointAddress, min(size-len(out),0x80000), timeout=3000)
         except usb.core.USBError: c=b''
         if c: out+=bytes(c); last=time.monotonic()
-    return out
+    return bytes(out)
 
 def teardown():
     # DLL-verified end-of-scan quiesce (FUN_10009da0): clear scan-mode bits so the ASIC goes
@@ -651,7 +686,11 @@ def emit_motor_tables(xdpi=75, exposure=0x2a00, travel=1310, lines=None):
     slope =motor_tables.build_slope(xdpi,exposure=exposure,travel=travel,lines=lines)
     tail  =motor_tables.build_hometail(xdpi,exposure=exposure)
     wr(0x06,0x30); wr(0x02,0x80); rd(0x03)
-    wr(0x20,0x50); wr(0x36,0x89)
+    # reg20 = 0x60 here (bits[5:4]=2), verified against the ScanGear 150- and
+    # 1200-dpi captures. Was 0x50 (bits[5:4]=1) - an offline full-trace diff of
+    # this driver vs the captures flagged it as the one motor-path register we
+    # got wrong. dpi-independent (both captures agree), so it applies to all rungs.
+    wr(0x20,0x60); wr(0x36,0x89)
     sdram(0x7fffff); _bulk_out(master)
     sdram(0x803fff); _bulk_out(slope)
     sdram(0x801fff); _bulk_out(tail)
@@ -669,7 +708,11 @@ def emit_scan_program(xdpi, ydpi, width, lines, mode, depth=8, ytop=0, matrix=No
     feed = (ytop//2 + 10 + CF66)//(1200//ydpi)  # step 33  feed/start count
     w16(0x10,0x11,feed)
     wbit(0x06,4,2,1 if depth==8 else 3)         # step 34  depth code (USB2)
-    ydiv = (0xf if ydpi==400 else 600//ydpi) if ydpi<1200 else max(1,2400//ydpi if ydpi<2400 else 1)
+    # Y step divider. Res-class 1 (<=600 dpi): 600/ydpi. Res-class 0 (>=1200 dpi):
+    # divider 1 - verified against the ScanGear 1200-dpi USB capture, whose full-page
+    # pass writes reg07=0x01. The old 2400/ydpi formula gave 2 at 1200 and desynced
+    # the line clock (0 bytes captured).
+    ydiv = 1 if ydpi>=1200 else (0xf if ydpi==400 else 600//ydpi)
     wbit(0x07,0,4,ydiv)                         # step 35  Y step divider
     wbit(0x07,4,1,0)                            # step 36
     w16(0x1b,0x1c,lines)                        # step 37  capture line count
@@ -699,7 +742,11 @@ def emit_scan_program(xdpi, ydpi, width, lines, mode, depth=8, ytop=0, matrix=No
     M = matrix if matrix else [0x2000,0,0, 0,0x2000,0, 0,0,0x2000]   # step 49 (col-major stream)
     stream=[M[0],M[3],M[6],M[1],M[4],M[7],M[2],M[5],M[8]]
     for v in stream: wr(0x37,v&0xff); wr(0x38,(v>>8)&0xff)
-    wbit(0x02,4,2,2)                            # step 51  LAUNCH (run mode 2 at every dpi)
+    # step 51  LAUNCH. Res-class 1 (<=600 dpi): run-mode 2 (reg02 bits[5:4]=10).
+    # Res-class 0 (>=1200 dpi): run-mode 0 - verified against the ScanGear 1200-dpi
+    # USB capture, whose full-page pass launches with reg02=0x82 (bit5 CLEAR). Leaving
+    # bit5 set at 1200 moved the carriage but streamed 0 bytes.
+    wbit(0x02,4,2,0 if xdpi>=1200 else 2)
     wbit(0x2f,7,1,1)
     wbit(0x02,1,1,1)                            # GO
     commit()                                    # SEL 0x24 strobe

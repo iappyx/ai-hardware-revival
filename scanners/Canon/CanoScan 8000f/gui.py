@@ -12,7 +12,8 @@ from tkinter import ttk, filedialog, messagebox
 
 import driver, imaging
 
-DPI_CHOICES = ['75', '150 (downsampled)', '300', '600', '1200 (unsupported)']
+DPI_CHOICES = ['75', '100', '150', '200', '300', '400', '600',
+               '800 (experimental)', '1200 (experimental)']
 MODES = ['color', 'gray', 'lineart']
 DEPTHS = [8, 16]
 FORMATS = ['png', 'tif', 'jpg', 'pdf', 'raw']
