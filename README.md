@@ -32,7 +32,7 @@ work-in-progress.
 
 | Device | Type | Platforms | Status | Project |
 |--------|------|-----------|--------|---------|
-| Canon CanoScan 8000F | Flatbed scanner (USB) | macOS/Linux (Python CLI + GUI), Android (Kotlin) | 75/300/600 dpi verified; colour/gray/line-art, 8/16-bit; 150/1200 dpi WIP | [`scan8000f`](https://github.com/iappyx/scan8000f) |
+| Canon CanoScan 8000F | Flatbed scanner (USB) | macOS/Linux (Python CLI + GUI) | 75/300/600 dpi verified; colour/gray/line-art, 8/16-bit; 150/1200 dpi WIP | [`scan8000f`](https://github.com/iappyx/scan8000f) |
 
 
 ## Principles
