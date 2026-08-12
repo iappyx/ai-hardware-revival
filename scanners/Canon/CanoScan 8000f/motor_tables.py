@@ -189,7 +189,7 @@ def set_dll_path(path):
 
 def build_slope(xdpi, exposure=0x2a00, travel=1310,
                 ca00=0, ca20=None, ca4c=None,
-                d1b8=0, chan_gain=1.0, lines=None):
+                d1b8=0, chan_gain=1.0):
     """Build the imaging slope table (SDRAM 0x803fff) exactly as FUN_1000dc90.
 
     Implements the LONG (imaging) branch, taken when travel>=0x514 or ca20!=0.
@@ -343,33 +343,6 @@ def build_hometail(xdpi, exposure=0x2a00, ca20=None, ca4c=None, ca00=0):
     return bytes(out)
 
 
-
-
-def _total_steps(dpi, travel, exposure):
-    sl = build_slope(dpi, exposure=exposure, travel=travel)
-    w = struct.unpack('>%dI' % (len(sl) // 4), sl)
-    return 1179 + w[1179] + (len(w) - 1180)
-
-def imaging_travel(dpi, exposure=0x2a00, target_steps=3046):
-    """Motor travel (steps) so the carriage covers the SAME physical bed length
-    (== the verified 75-dpi full-bed value) at any dpi. Higher dpi captures more
-    lines via a longer cruise period + smaller Y-divider, NOT more travel.
-    Equalising total commanded steps prevents the carriage over-running the bed."""
-    if dpi <= 75:
-        return 1310
-    lo, hi, best = 520, 6000, None
-    for _ in range(40):
-        mid = (lo + hi) // 2
-        try:
-            t = _total_steps(dpi, mid, exposure)
-        except Exception:
-            lo = mid + 1; continue
-        if best is None or abs(t - target_steps) < abs(best[1] - target_steps):
-            best = (mid, t)
-        if t < target_steps: lo = mid + 1
-        else: hi = mid - 1
-        if lo > hi: break
-    return best[0]
 
 
 if __name__ == '__main__':

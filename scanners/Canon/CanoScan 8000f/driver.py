@@ -26,7 +26,8 @@ REQ_REG, REQ_BUF = 0x0c, 0x04
 V_SETADDR, V_WRVAL, V_RDREG, V_GPIO, V_BUF = 0x83, 0x85, 0x84, 0x8a, 0x82
 
 GAIN_K = 210.0
-TRAVEL_STEPS = 1310   # OEM imaging-move carriage travel (steps); see scan()
+TRAVEL_STEPS = 1302   # OEM imaging-move carriage travel (steps); matches the vendor's
+                      # slope table byte-for-byte in the 150 capture (was 1310, off by 8)
 _NATIVE = {'pwm': 800}
 
 # module-level device state (single scanner)
@@ -34,6 +35,17 @@ dev = None; ep_in = None; ep_out = None
 shadow = [0] * 0x80
 ostat = {'w': 0, 'r': 0}
 _MASTER_NS = motor_tables.MASTER_NS   # 1179-entry ns ramp (from motor_tables)
+
+# ---- diagnostics -----------------------------------------------------------
+# USB-transfer trace: when _XLOG is a list, every control/bulk transfer the
+# driver actually makes is appended (register program + motor-table bytes), so
+# a real scan can be diffed against the vendor ScanGear capture. scan() turns it
+# on and dumps it to <scan8000f>/last_scan_trace.txt at the end of the run.
+_XLOG = None
+def _xlog(s):
+    if _XLOG is not None:
+        _XLOG.append(s)
+
 
 def log(*a):
     msg = ' '.join(str(x) for x in a)
@@ -99,10 +111,20 @@ def close_device():
 
 _MODEMAP = {'color': 2, 'colour': 2, 'gray': 1, 'grey': 1, 'lineart': 0, 'bw': 0}
 
-def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
-    """Run a full native scan. Returns (raw_bytes, meta). mode: color|gray|lineart."""
-    global _PROGRESS
+def scan(dpi=300, mode='color', depth=8, progress=None, preview=None, trace=False,
+         region=None):
+    """Run a full native scan. Returns (raw_bytes, meta). mode: color|gray|lineart.
+    trace=True writes every USB transfer of this scan to <scan8000f>/last_scan_trace.txt
+    (diagnostic; off by default).
+    region=(x0,y0,x1,y1) in normalised [0,1] bed coordinates returns just that rectangle,
+    and shortens the scan: the carriage scans from its start edge only up THROUGH the
+    selection (a reduced line count — the mechanism proven on hardware), then the leading
+    rows and the X range are cropped in software. Selections toward the document bottom
+    (scanned first) save the most; a selection touching the very top still scans the full
+    bed. The feed register is never used to reposition. None = full bed (unchanged)."""
+    global _PROGRESS, _XLOG
     if progress is not None: _PROGRESS = progress
+    _XLOG = [] if trace else None   # capture the real USB transfer trace only when asked
     m = _MODEMAP.get(str(mode).lower(), 2)
     lineart = (m == 0); color = (m == 2)
     if lineart: depth = 1
@@ -116,22 +138,62 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
     # size on export. (Driving the motor at a non-native rate has no tail table and
     # would over-run the carriage, the same failure mode as the old native-150 bug.)
     _RESAMPLE_FROM = {100: 150, 200: 300, 400: 600, 800: 1200}
-    out_width = out_lines = None
     if dpi in _RESAMPLE_FROM:
-        out_width = int(round(620 * dpi / 75.0))
-        out_lines = int(round(876 * dpi / 75.0))
         dpi = _RESAMPLE_FROM[dpi]          # program the hardware at the native rung
+    ratio = requested_dpi / float(dpi)     # 1.0 native, 2/3 for the resampled rungs
     downscale = 1
-    width = int(round(620 * dpi / 75.0))
-    lines = int(round(876 * dpi / 75.0))
-    expo  = 0x5400 if dpi >= 1200 else 0x2a00
-    motor_expo = expo
-    # Motor travel = the OEM geometry value (~1310 steps), confirmed against a real
-    # ScanGear 150-dpi USB capture: its slope + home-decel tail are byte-exact with
-    # build_slope(dpi, travel=TRAVEL_STEPS) / build_hometail(dpi). Do NOT reduce it -
-    # the home-decel tail is a fixed ramp that assumes the carriage stops at this
-    # position; a shorter travel makes the tail over-drive the carriage past home.
-    travel = TRAVEL_STEPS
+    full_w = int(round(620 * dpi / 75.0))  # full-bed native dimensions
+    full_l = int(round(876 * dpi / 75.0))
+    # Region scan. The carriage scans from raw row 0 (= the document BOTTOM in the final
+    # image; the decode rotates 180° and the preview fills bottom-up) upward. We use only
+    # the LINE-COUNT mechanism (proven to work on hardware) — never the feed register,
+    # which does not reliably reposition the carriage — to capture just raw rows
+    # [0 .. selection top + margin], i.e. from the scanned edge THROUGH the selection.
+    # That genuinely shortens the pass (real time/data saving; biggest for selections
+    # toward the document bottom, which are scanned first). The leading rows below the
+    # selection, and the X range, are then cropped losslessly in software. The MARGIN
+    # (native rows) covers the decode's channel-realignment trim so the selection top is
+    # never eaten. A full-bed scan (region=None) is completely unaffected.
+    _MARGIN = 64
+    lines = full_l
+    width = full_w
+    crop_x0, crop_x1 = 0, full_w
+    crop_y0, crop_y1 = 0, full_l
+    if region:
+        x0, y0, x1, y1 = region
+        x0, x1 = sorted((min(max(x0, 0.0), 1.0), min(max(x1, 0.0), 1.0)))
+        y0, y1 = sorted((min(max(y0, 0.0), 1.0), min(max(y1, 0.0), 1.0)))
+        crop_x0 = int(round(x0 * full_w)); crop_x1 = max(crop_x0 + 1, int(round(x1 * full_w)))
+        fy0 = int(round(y0 * full_l)); fy1 = int(round(y1 * full_l))
+        region_h = max(1, fy1 - fy0)
+        lines = min(full_l, full_l - fy0 + _MARGIN)     # capture edge -> selection top
+        crop_y0 = max(0, lines - full_l + fy0)          # selection top in the captured frame
+        crop_y1 = crop_y0 + region_h
+    crop_w = crop_x1 - crop_x0
+    crop_h = crop_y1 - crop_y0
+    # Export target size AFTER the software crop: resample by `ratio` for the non-native
+    # rungs; a native full-bed scan needs neither (out_* stay None).
+    if region or ratio != 1.0:
+        out_width = int(round(crop_w * ratio))
+        out_lines = int(round(crop_h * ratio))
+    else:
+        out_width = out_lines = None
+    expo  = 0x5400 if dpi >= 1200 else 0x2a00   # CCD line-period exposure (reg09/0a/0b/0c)
+    # ---- MOTOR slope-table parameters -------------------------------------------------
+    # These were recovered by extracting the vendor's ACTUAL uploaded slope table from the
+    # ScanGear 1200 USB capture (bytes at OLE main-stream offset 13178292) and finding the
+    # parameters that reproduce it BYTE-FOR-BYTE (all 2339 words, 0 differences):
+    #   motor exposure 0x2a00, travel 1302, tail gain 0.5  (res-class-0 / native 1200).
+    # The key one is the exposure: the motor is driven from the BASE exposure 0x2a00, NOT
+    # the CCD's doubled 0x5400. That sets the cruise-period word to 0x8000fc00 (64512)
+    # instead of 0x8001f800 (129024) - our value was exactly 2x too large, so the motor
+    # stepped half as often and the carriage reached only ~half the plate (image squeezed
+    # into the top half, ~2x vertical stretch). res-class-1 (<=600) is unchanged: it
+    # already used 0x2a00 / travel 1310 / gain 1.0.
+    if dpi >= 1200:
+        motor_expo, travel, motor_gain = 0x2a00, TRAVEL_STEPS, 0.5
+    else:
+        motor_expo, travel, motor_gain = expo, TRAVEL_STEPS, 1.0
     if lineart:   stride = (width + 7) // 8
     elif color:   stride = width * 3 * (2 if depth == 16 else 1)
     else:         stride = width * (2 if depth == 16 else 1)
@@ -144,7 +206,7 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
 
     native_init()
     _NATIVE['pwm'] = native_warmup()
-    native_calibrate()
+    native_calibrate(dpi)          # dpi = native rung; picks res-class-0 (10600px) shading at 1200
     lamp_on(0x320, _NATIVE['pwm'])
     wbit(0x01, 5, 1, 1)
     wr(0x08, 0x01)
@@ -170,7 +232,7 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
         if move_done(): break
         time.sleep(0.05)
     wbit(0x20, 0, 4, 0)
-    emit_motor_tables(dpi, exposure=motor_expo, travel=travel, lines=lines)
+    emit_motor_tables(dpi, exposure=motor_expo, travel=travel, chan_gain=motor_gain)
     feed = emit_scan_program(dpi, dpi, width, lines, m, depth=depth)
     log('scanning... (streaming %d bytes)' % target)
     pmeta = dict(width=width, channels=3 if color else 1, depth=depth,
@@ -198,9 +260,24 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
     teardown()          # clear scan-mode bits so the ASIC idles cleanly (stops the status-LED flicker)
     meta = dict(dpi=requested_dpi, scandpi=dpi, downscale=downscale,
                 out_width=out_width, out_lines=out_lines,
+                crop_x0=crop_x0, crop_x1=crop_x1, crop_y0=crop_y0, crop_y1=crop_y1,
                 width=width, lines=lines, channels=3 if color else 1,
                 depth=depth, lineart=1 if lineart else 0, stride=stride, mode=mode)
     log('done: %d bytes' % len(image))
+    # optional USB transfer trace (diagnostic; enabled by trace=True)
+    if _XLOG is not None:
+        try:
+            _tp = os.path.join(_HERE, 'last_scan_trace.txt')
+            with open(_tp, 'w') as _tf:
+                _tf.write('# scan trace: dpi=%d(native %d) mode=%s depth=%d\n'
+                          % (requested_dpi, dpi, mode, depth))
+                _tf.write('# W=write R=read SEL=commit BO=bulk-out(motor/shading table)\n')
+                _tf.write('\n'.join(_XLOG))
+                _tf.write('\n')
+            log('USB trace written: %s (%d transfers)' % (_tp, len(_XLOG)))
+        except Exception as _e:
+            log('trace write failed: %s' % _e)
+        _XLOG = None
     return bytes(image), meta
 
 def _reactive_home_quiet(timeout_s=25.0):
@@ -222,6 +299,7 @@ def sel(addr):  dev.ctrl_transfer(0x40, REQ_REG, V_SETADDR, 0, bytes([addr]), ti
 def wr(addr, val):
     val&=0xff; shadow[addr]=val
     sel(addr); dev.ctrl_transfer(0x40, REQ_REG, V_WRVAL, 0, bytes([val]), timeout=2000); ostat['w']+=1
+    _xlog('W %02x %02x' % (addr, val))
 
 def rd(addr):
     for _ in range(4):
@@ -231,16 +309,16 @@ def rd(addr):
         except Exception:
             time.sleep(0.02); continue
         if r is not None and len(r):
-            ostat['r'] += 1; return bytes(r)[0]
+            ostat['r'] += 1; _xlog('R %02x %02x' % (addr, bytes(r)[0])); return bytes(r)[0]
         time.sleep(0.02)
-    ostat['r'] += 1; return 0
+    ostat['r'] += 1; _xlog('R %02x 00' % addr); return 0
 
 def wbit(addr, start, width, val):
     mask=((1<<width)-1)<<start
     shadow[addr]=(shadow[addr] & ~mask) | ((val<<start)&mask)
     wr(addr, shadow[addr])
 
-def commit(): sel(0x24)
+def commit(): sel(0x24); _xlog('SEL 24')
 
 def afe(afe_addr, val):                              # FUN_10006140: 0x25=addr, 0x26=data
     wr(0x25, afe_addr & 0x3f); wr(0x26, val & 0xff)
@@ -272,9 +350,15 @@ def _bulk_out(payload):
     size=len(payload)
     arm=bytes([1,0,0x82,0, size&0xff,(size>>8)&0xff,(size>>16)&0xff,(size>>24)&0xff])
     dev.ctrl_transfer(0x40, REQ_BUF, V_BUF, 0, arm, timeout=2000)
-    off=0
+    _xlog('BO %d head=%s tail=%s' % (size, payload[:24].hex(), payload[-8:].hex()))
+    off=0; retries=0
     while off<size:
-        n=dev.write(ep_out.bEndpointAddress, payload[off:off+0xf000], timeout=3000)
+        try:
+            n=dev.write(ep_out.bEndpointAddress, payload[off:off+0xf000], timeout=8000)
+        except usb.core.USBError:
+            retries+=1
+            if retries>3: raise
+            continue
         if not n: break
         off+=n
     return off
@@ -596,9 +680,14 @@ def _calib_capture(isWhite,W,E,log=print):
     log('  capture %s: %d/20 lines, ch sample %s'%('white' if isWhite else 'dark',n,means))
     return rows,W
 
-def native_calibrate(log=print):
-    # DoCalibration flatbed, 600-class (c120): serves every scan <=600 dpi (pure python)
-    W=0x14b4; E=0x2a00
+def native_calibrate(dpi=300, log=print):
+    # DoCalibration flatbed (pure python). The calibration/shading WIDTH is res-class
+    # dependent (CALIBRATION_SPEC: 0x14b4 for the 600 class, 0x2968 for the 1200 class).
+    # 0x2968 (10600) is ~2x 0x14b4 because res-class 0 calibrates BOTH CCD pixel arrays;
+    # the 600-class 0x14b4 only calibrates one, so a 1200 scan's second array gets no
+    # shading and comes out black past ~col 5000. 75-600 stay on 0x14b4, unchanged.
+    W = 0x2968 if dpi >= 1200 else 0x14b4
+    E = 0x2a00
     # ---- WHITE: gains first (FUN_10009180) ----
     lamp_on(0,_NATIVE['pwm'])
     wbit(0x01,5,1,0); wbit(0x2f,7,1,1)          # scan enable for counter latching
@@ -619,7 +708,7 @@ def native_calibrate(log=print):
     log('  AFE gains: %s'%['%02x'%g for g in gains])
     # ---- offsets (lamp off inside) ----
     w16r(0x09,0x0a,4); w16r(0x0b,0x0c,4)
-    offset_search(600,log)
+    offset_search(dpi if dpi>=1200 else 600, log)
     # ---- white capture ----
     rows,W2=_calib_capture(True,W,E,log)
     nL=len(rows); NC=W*3
@@ -668,16 +757,19 @@ def native_calibrate(log=print):
             out+=_struct.pack('>H',int(dsm[x*3+c])&0xffff)
         if (len(out)&0x1ff)==0x1f8: out+=b'\x00'*8
     sdram(0xffffff)
-    _bulk_out(bytes(out))
+    # Chunked OUT (SDRAM auto-increments): a single OUT transfer has a ceiling the
+    # 600-class table (64608 B) clears but the 1200-class table (~129216 B) does not,
+    # so a one-shot _bulk_out times out. Same mechanism the gamma uploads already use.
+    _bulk_out_chunked(bytes(out))
     wbit(0x2f,7,1,0)
     log('  shading uploaded: %d bytes (W=%d)'%(len(out),W))
     return dict(gains=gains,white=white,dark=dsm)
 
-def emit_motor_tables(xdpi=75, exposure=0x2a00, travel=1310, lines=None):
+def emit_motor_tables(xdpi=75, exposure=0x2a00, travel=1310, chan_gain=1.0):
     # Native replacement for capture ops 3460-3479: three generated tables,
     # byte-exact vs the capture. master->0x7fffff, slope->0x803fff, home-decel->0x801fff.
     master=motor_tables.build_master_ramp()
-    slope =motor_tables.build_slope(xdpi,exposure=exposure,travel=travel,lines=lines)
+    slope =motor_tables.build_slope(xdpi,exposure=exposure,travel=travel,chan_gain=chan_gain)
     tail  =motor_tables.build_hometail(xdpi,exposure=exposure)
     wr(0x06,0x30); wr(0x02,0x80); rd(0x03)
     # reg20 bits[5:4] is resolution-tiered: 0x50 for 75/300/600 (hardware-proven -
@@ -705,7 +797,10 @@ def emit_scan_program(xdpi, ydpi, width, lines, mode, depth=8, ytop=0, matrix=No
     # divider 1 - verified against the ScanGear 1200-dpi USB capture, whose full-page
     # pass writes reg07=0x01. The old 2400/ydpi formula gave 2 at 1200 and desynced
     # the line clock (0 bytes captured).
-    ydiv = 1 if ydpi>=1200 else (0xf if ydpi==400 else 600//ydpi)
+    # Y-step divider: res-class-0 (>=1200) = 1; res-class-1 = 600/ydpi. ydpi here is
+    # always a native rung (75/150/300/600/1200) — the resampled rungs 100/200/400/800
+    # are remapped to their native rung in scan() before this runs.
+    ydiv = 1 if ydpi>=1200 else 600//ydpi
     wbit(0x07,0,4,ydiv)                         # step 35  Y step divider
     wbit(0x07,4,1,0)                            # step 36
     w16(0x1b,0x1c,lines)                        # step 37  capture line count
@@ -714,12 +809,23 @@ def emit_scan_program(xdpi, ydpi, width, lines, mode, depth=8, ytop=0, matrix=No
     t = {2400:0x88,4800:0x88,1200:0x90,600:(0x60 if ydpi<1200 else 0x30),300:0x90}.get(xdpi,0xc0)
     wr(0x1e,t); wr(0x1f,t)                      # step 39
     for v in (0x46e,0x469,0x447): w16(0x33,0x34,v)   # step 40  R,G,B exposure gates
-    if mode==2:                                 # step 41  COLOR: [1:0]=1, [7:6] untouched
+    if mode==2:                                 # step 41  COLOR: [1:0]=1
         wbit(0x05,0,2,1)
     elif mode==1:
         wbit(0x05,0,2,2); wbit(0x05,6,2,1)
     else:
         wbit(0x05,0,2,0); wr(0x15,0x80); wr(0x16,0x80); wbit(0x05,6,2,1)
+    # reg03[7:6]=11 -> reg03=0xc4 (with bit2 already set). This is the ASIC's power-on
+    # shadow default (shadow byte 3 = 0xc0) that the vendor preserves through every
+    # reg03 RMW at EVERY resolution; our register image starts at 0, so we set it
+    # explicitly to match the vendor's imaging program byte-for-byte (verified against
+    # both the 150 and 1200 captures). At 1200 these bits are load-bearing for the
+    # res-class-0 motor Y-scale; at <=600 the vendor carries them too.
+    wbit(0x03,6,2,3)
+    if xdpi>=1200:
+        # Res-class 0 only: reg05 bit6 = dual-array channel-combine (FULL_PROGRAM_SPEC
+        # reg5[7:6]).
+        wbit(0x05,6,1,1)
     wbit(0x01,3,1,1); wbit(0x01,4,1,1)          # step 42
     wbit(0x01,7,1,1 if depth!=16 else 0)        # step 43
     wbit(0x01,6,1,0)                            # step 44

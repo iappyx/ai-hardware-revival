@@ -31,8 +31,9 @@ def save_raw(raw, meta, path):
         f.write(raw)
     with open(path + '.meta', 'w') as f:
         f.write(' '.join('%s=%s' % (k, meta[k]) for k in
-                ('dpi', 'width', 'lines', 'channels', 'depth', 'lineart', 'stride', 'mode')
-                if k in meta))
+                ('dpi', 'scandpi', 'width', 'lines', 'channels', 'depth', 'lineart',
+                 'stride', 'mode', 'out_width', 'out_lines')
+                if k in meta and meta[k] is not None))
     return path
 
 def _decode_float(raw, meta):
@@ -51,7 +52,21 @@ def _decode_float(raw, meta):
         return np.flipud(np.fliplr(a)), 'L'
     l0, l1, l2 = a[:, 0::3], a[:, 1::3], a[:, 2::3]
     dv = lambda x: np.diff(x, axis=0)
-    def bshift(A, B, lim=24):
+    # Inter-channel vertical realignment. The CCD's R/G/B rows are physically
+    # offset, so each colour lane lands a fixed number of scan-lines apart and
+    # the vendor's host demux (FUN_10009f20, 3 lane buffers) shifts them back
+    # together before interleaving. That spacing scales with the Y pitch: ~8/16
+    # lines (G/B vs R) at 600-class, but ~16/32 at res-class-0 (native 1200).
+    # The search window must clear the largest offset or the correlation locks
+    # onto a spurious near peak (measured: B lands at -32 at 1200, but a lim=24
+    # window mis-picked -13, leaving the blue channel ~19 lines out -> the heavy
+    # colour fringing that read as a "stretched" 1200 scan). Widen the window
+    # only for res-class-0; <=600 keeps the original 24 exactly.
+    lim = 48 if meta.get('scandpi', meta.get('dpi', 300)) >= 1200 else 24
+    lim = min(lim, max(0, L - 2))          # can't search a larger shift than we have lines
+    def bshift(A, B, lim=lim):
+        if lim <= 0 or A.shape[0] <= 1:
+            return 0
         nrm = lambda x: (x - x.mean()) / (x.std() + 1e-9)
         best = (-2.0, 0)
         for s in range(-lim, lim + 1):
@@ -88,13 +103,72 @@ def to_image(raw, meta, bits=8):
         return _decode_py(raw, meta)   # 8-bit only
     import numpy as np
     arr, mode = _decode_float(raw, meta)
-    if bits == 16 and depth == 16:
+    # Pillow has a single-channel 16-bit mode (I;16) but no 48-bit RGB mode, so 16-bit
+    # is preserved here only for GRAY. True 16-bit COLOUR is written straight from the
+    # array by export()'s TIFF path; a 16-bit colour request that reaches to_image
+    # (PNG/JPEG/PDF/preview) is delivered as 8-bit rather than crashing.
+    if bits == 16 and depth == 16 and mode == 'L':
         u = (np.clip(arr, 0, 1) * 65535.0).astype(np.uint16)
-        if mode == 'L':
-            return Image.fromarray(u, 'I;16')
-        return Image.fromarray(u, 'RGB')          # 16-bit/chan RGB (TIFF)
+        return Image.fromarray(u, 'I;16')
     u = (np.clip(arr, 0, 1) * 255.0).astype(np.uint8)
     return Image.fromarray(u, mode)
+
+def to_array16(raw, meta):
+    """Decode to a 16-bit uint array: (H,W,3) 'RGB' or (H,W) 'L' — same sRGB-encoded
+    values as the 8-bit path, at full precision. Requires numpy."""
+    import numpy as np
+    arr, mode = _decode_float(raw, meta)
+    return (np.clip(arr, 0, 1) * 65535.0).astype(np.uint16), mode
+
+def _resample_rgb16(u16, tw, th):
+    """LANCZOS-resample a uint16 (H,W,3)/(H,W) array via Pillow 'F' mode per band."""
+    import numpy as np
+    from PIL import Image
+    bands = [u16] if u16.ndim == 2 else [u16[:, :, i] for i in range(u16.shape[2])]
+    out = [np.clip(np.asarray(
+        Image.fromarray(b.astype(np.float32), 'F').resize((tw, th), Image.LANCZOS)),
+        0, 65535).astype(np.uint16) for b in bands]
+    return out[0] if u16.ndim == 2 else np.stack(out, -1)
+
+def _save_tiff16(u16, path, dpi):
+    """Write a minimal baseline (uncompressed, little-endian) 16-bit TIFF from a
+    uint16 (H,W,3) RGB or (H,W) gray array. Dependency-free (struct only), so 16-bit
+    colour works without tifffile on the target machine."""
+    import struct, numpy as np
+    if u16.ndim == 2:
+        h, w = u16.shape; spp = 1; photo = 1
+    else:
+        h, w, spp = u16.shape; photo = 2
+    data = np.ascontiguousarray(u16).astype('<u2').tobytes()
+    SHORT, LONG, RATIONAL = 3, 4, 5
+    ntags = 12
+    ifd_start = 8
+    pos = ifd_start + 2 + ntags * 12 + 4      # first free byte after the IFD
+    blobs = b''
+    def add(b):
+        nonlocal pos, blobs
+        off = pos; blobs += b; pos += len(b); return off
+    bps = add(struct.pack('<%dH' % spp, *([16] * spp))) if spp > 1 else 16
+    xres = add(struct.pack('<II', int(dpi), 1))
+    yres = add(struct.pack('<II', int(dpi), 1))
+    strip = pos
+    def e(t, typ, cnt, val): return struct.pack('<HHII', t, typ, cnt, val)
+    ifd = struct.pack('<H', ntags)
+    ifd += e(256, LONG, 1, w) + e(257, LONG, 1, h)
+    ifd += e(258, SHORT, spp, bps) + e(259, SHORT, 1, 1) + e(262, SHORT, 1, photo)
+    ifd += e(273, LONG, 1, strip) + e(277, SHORT, 1, spp)
+    ifd += e(278, LONG, 1, h) + e(279, LONG, 1, len(data))
+    ifd += e(282, RATIONAL, 1, xres) + e(283, RATIONAL, 1, yres) + e(296, SHORT, 1, 2)
+    ifd += struct.pack('<I', 0)
+    with open(path, 'wb') as fh:
+        fh.write(struct.pack('<2sHI', b'II', 42, ifd_start))
+        fh.write(ifd); fh.write(blobs); fh.write(data)
+    return path
+
+def _target_dims(w, h, ow, ol, ds):
+    if ow and ol: return int(ow), int(ol)
+    if ds and ds > 1: return max(1, w // ds), max(1, h // ds)
+    return None, None
 
 def _decode_py(raw, meta):
     """Pure-Python 8-bit fallback (no numpy)."""
@@ -127,19 +201,53 @@ def export(raw, meta, out_base, formats):
         return written  # empty capture: nothing to encode (raw already handled above)
     dpi = meta['dpi']
     want16 = (meta['depth'] == 16)
-    im8 = None; im16 = None
+    is_color = meta.get('channels', 3) == 3
+    ow = meta.get('out_width'); ol = meta.get('out_lines'); ds = meta.get('downscale', 1)
+    # Region scans crop both axes in software, in the decoded (final/preview) frame —
+    # exactly where the user drew the box — before any resample. Full scans no-op.
+    cx0 = meta.get('crop_x0'); cx1 = meta.get('crop_x1')
+    cy0 = meta.get('crop_y0'); cy1 = meta.get('crop_y1')
+    caplines = meta.get('lines')
+    def _crop(im):
+        # crop_y* are in the CAPTURED frame; the decode trims channel-realign rows off the
+        # top, so shift the Y crop up by that trim (= captured lines - decoded height).
+        trim = (caplines - im.height) if caplines else 0
+        x0 = min(max(cx0 or 0, 0), im.width)
+        x1 = min(cx1 if cx1 is not None else im.width, im.width)
+        y0 = min(max((cy0 or 0) - trim, 0), im.height)
+        y1 = min((cy1 - trim) if cy1 is not None else im.height, im.height)
+        if x1 <= x0 or y1 <= y0:              # truncated capture / degenerate box -> no crop
+            return im
+        if (x0, y0, x1, y1) != (0, 0, im.width, im.height):
+            return im.crop((x0, y0, x1, y1))
+        return im
+    im8 = None; imgray16 = None
     for f in formats:
         pil = _EXT.get(f)
         if not pil:
             continue
         path = '%s.%s' % (out_base, f)
-        # 16-bit preserved for TIFF/PNG; JPEG/PDF are 8-bit
-        use16 = want16 and pil in ('TIFF', 'PNG')
+        # True 16-bit COLOUR only round-trips through TIFF (Pillow has no 48-bit RGB
+        # mode) — write it straight from the array. 16-bit GRAY uses Pillow's I;16.
+        # 16-bit colour to PNG/JPEG/PDF is delivered as 8-bit (no silent crash).
+        if want16 and is_color and pil == 'TIFF' and HAVE_NP:
+            u16, _m = to_array16(raw, meta)
+            h0, w0 = u16.shape[0], u16.shape[1]
+            trim = (meta.get('lines') - h0) if meta.get('lines') else 0
+            xa = min(max(cx0 or 0, 0), w0); xb = min(cx1 if cx1 is not None else w0, w0)
+            ya = min(max((cy0 or 0) - trim, 0), h0); yb = min((cy1 - trim) if cy1 is not None else h0, h0)
+            if xb > xa and yb > ya and (xa, ya, xb, yb) != (0, 0, w0, h0):
+                u16 = u16[ya:yb, xa:xb]
+            tw, th = _target_dims(u16.shape[1], u16.shape[0], ow, ol, ds)
+            if tw and (tw, th) != (u16.shape[1], u16.shape[0]):
+                u16 = _resample_rgb16(u16, tw, th)
+            _save_tiff16(u16, path, dpi); written.append(path); continue
+        use16 = want16 and pil in ('TIFF', 'PNG') and not is_color   # 16-bit GRAY only
         if use16:
-            if im16 is None: im16 = to_image(raw, meta, bits=16)
-            img = im16
+            if imgray16 is None: imgray16 = _crop(to_image(raw, meta, bits=16))
+            img = imgray16
         else:
-            if im8 is None: im8 = to_image(raw, meta, bits=8)
+            if im8 is None: im8 = _crop(to_image(raw, meta, bits=8))
             img = im8
         # Resample to the requested output size. `out_width`/`out_lines` (exact
         # target dims) are set when the requested dpi is a non-native ScanGear
@@ -156,8 +264,8 @@ def export(raw, meta, out_base, formats):
         else:
             tw = th = None
         if tw and (tw, th) != (img.width, img.height):
-            if img.mode == '1':   # 1-bit: resample in L, then re-threshold
-                img = img.convert('L').resize((tw, th), _I.LANCZOS).convert('1')
+            if img.mode == '1':   # 1-bit: resample in L, then hard re-threshold (no dither)
+                img = img.convert('L').resize((tw, th), _I.LANCZOS).convert('1', dither=_I.NONE)
             else:
                 img = img.resize((tw, th), _I.LANCZOS)
         if pil == 'JPEG' and img.mode == '1': img = img.convert('L')
