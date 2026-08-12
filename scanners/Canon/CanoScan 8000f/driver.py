@@ -148,7 +148,15 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
     lamp_on(0x320, _NATIVE['pwm'])
     wbit(0x01, 5, 1, 1)
     wr(0x08, 0x01)
-    w16r(0x09, 0x0a, 0x2a0); w16r(0x0b, 0x0c, 0x2a0)
+    # reg09/0a and reg0b/0c = CCD line-period, and they scale with the exposure:
+    # expo>>4  (0x2a00>>4 = 0x2a0 for <=600 dpi; 0x5400>>4 = 0x540 at 1200). This was
+    # hardcoded 0x2a0, which is only correct for the <=600 exposure - at 1200 (expo
+    # 0x5400) it left the line period at half, so the CCD clocked lines twice as fast
+    # as the carriage advanced: the motor covered only ~40% of the bed by the time the
+    # line count was reached, and the rest of the frame came out blank/stretched.
+    # Verified against the ScanGear 1200 capture (reg09/0a = 0x0540 there).
+    _lp = expo >> 4
+    w16r(0x09, 0x0a, _lp); w16r(0x0b, 0x0c, _lp)
     for r in (0x70, 0x71, 0x72, 0x73, 0x74, 0x75): wr(r, 0)
     wbit(0x01, 2, 1, 1)
     if dpi >= 1200:
@@ -169,20 +177,11 @@ def scan(dpi=300, mode='color', depth=8, progress=None, preview=None):
                  lineart=1 if lineart else 0, total_lines=lines)
     image = bytearray(); t0 = time.monotonic(); wd = max(150.0, target / 2.0e5)
     last_prev = t0
-    # Read in 512 KB bands, matching the vendor driver (its capture arms bulk-IN in
-    # fixed 0x80000 sections, one continuous motor GO). At 1200 dpi (417 MB, slow
-    # fine-step motor) our old 64 KB bands could not drain the ASIC's SDRAM image
-    # buffer fast enough between re-arms: it overflowed, the chip halted the pipeline
-    # ~40% through, and the scan stopped short (recognisable-but-stretched partial
-    # image, and the status LED left flickering in the halted state).
-    empties = 0
     while len(image) < target and time.monotonic() - t0 < wd:
-        chunk = _patient_bulk_in(min(0x80000, target - len(image)), quiet_s=2.0)
+        chunk = _patient_bulk_in(min(0x10000, target - len(image)), quiet_s=1.2)
         if not chunk:
-            empties += 1
-            if empties >= 3 and time.monotonic() - t0 > 3: break
+            if time.monotonic() - t0 > 3: break
             continue
-        empties = 0
         image += bytes(chunk)
         if progress: progress('  %d%% (%d / %d)' % (100 * len(image) // target, len(image), target))
         # live preview: throttled so we never stall the read pipe for long
@@ -296,17 +295,12 @@ def _patient_bulk_in(size, quiet_s):
     arm=bytes([0,0,0x82,0, size&0xff,(size>>8)&0xff,(size>>16)&0xff,(size>>24)&0xff])
     try: dev.ctrl_transfer(0x40,REQ_BUF,V_BUF,0,arm,timeout=2000)
     except Exception: return b''
-    out=bytearray(); last=time.monotonic()
-    # Read large chunks (up to the whole 512 KB band per dev.read). libusb splits it
-    # into USB packets internally, so this is ONE Python/pyusb round-trip instead of
-    # ~9 at 0xf000 - the actual drain-rate lever. At 1200 dpi the old 0xf000 reads
-    # could not empty the ASIC's SDRAM ring fast enough (Python per-read overhead),
-    # so it backed up and the chip halted ~40% in.
+    out=b''; last=time.monotonic()
     while len(out)<size and time.monotonic()-last<quiet_s:
-        try: c=dev.read(ep_in.bEndpointAddress, min(size-len(out),0x80000), timeout=3000)
+        try: c=dev.read(ep_in.bEndpointAddress, min(size-len(out),0xf000), timeout=800)
         except usb.core.USBError: c=b''
         if c: out+=bytes(c); last=time.monotonic()
-    return bytes(out)
+    return out
 
 def teardown():
     # DLL-verified end-of-scan quiesce (FUN_10009da0): clear scan-mode bits so the ASIC goes
@@ -686,11 +680,10 @@ def emit_motor_tables(xdpi=75, exposure=0x2a00, travel=1310, lines=None):
     slope =motor_tables.build_slope(xdpi,exposure=exposure,travel=travel,lines=lines)
     tail  =motor_tables.build_hometail(xdpi,exposure=exposure)
     wr(0x06,0x30); wr(0x02,0x80); rd(0x03)
-    # reg20 = 0x60 here (bits[5:4]=2), verified against the ScanGear 150- and
-    # 1200-dpi captures. Was 0x50 (bits[5:4]=1) - an offline full-trace diff of
-    # this driver vs the captures flagged it as the one motor-path register we
-    # got wrong. dpi-independent (both captures agree), so it applies to all rungs.
-    wr(0x20,0x60); wr(0x36,0x89)
+    # reg20 bits[5:4] is resolution-tiered: 0x50 for 75/300/600 (hardware-proven -
+    # 0x60 skews those and cuts the plate short), 0x60 for 150 AND 1200 (both match
+    # their ScanGear captures; 150's over-run and 1200's motor are on this tier).
+    wr(0x20, 0x60 if xdpi in (150, 1200) else 0x50); wr(0x36,0x89)
     sdram(0x7fffff); _bulk_out(master)
     sdram(0x803fff); _bulk_out(slope)
     sdram(0x801fff); _bulk_out(tail)
