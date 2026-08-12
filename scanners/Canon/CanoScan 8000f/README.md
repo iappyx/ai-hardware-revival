@@ -71,6 +71,42 @@ bed (it's the last thing the carriage reaches). On the CLI, pass
 Add `--trace` (CLI) or tick **USB trace log** (GUI) to write a full USB transfer
 log to `last_scan_trace.txt` — a diagnostic, off by default.
 
+## Native macOS scanner (eSCL bridge)
+
+`escl_bridge.py` turns this driver into a **driverless network scanner**. macOS
+(and iOS/Linux) support the eSCL / AirScan protocol out of the box, so once the
+bridge is running the 8000F appears as a normal scanner in **Image Capture,
+Preview, and Printers & Scanners** — with preview, area select and scan — and no
+Canon software or third-party app installed. The "driver" is just this daemon
+translating eSCL on one side to `driver.scan()` over USB on the other.
+
+Run it manually (it only serves while the terminal is open — no autostart):
+
+```
+pip3 install zeroconf          # one-time, for Bonjour discovery
+python3 escl_bridge.py         # binds 0.0.0.0:8090, advertises over Bonjour
+python3 escl_bridge.py --port 9000
+python3 escl_bridge.py --no-mdns   # HTTP only, no advertising (test with curl)
+python3 escl_bridge.py --fake      # instant synthetic image, scanner untouched (diagnostic)
+```
+
+**How it works.** The bridge is a small HTTP server implementing the four eSCL
+endpoints and advertising an `_uscan._tcp` Bonjour service so macOS discovers it:
+
+- `GET /eSCL/ScannerCapabilities` — resolutions, colour modes, bed size, JPEG/PDF.
+- `GET /eSCL/ScannerStatus` — Idle/Processing plus per-job state. macOS decides to
+  fetch a page only when this reports `ImagesToTransfer >= 1` with the job-state
+  elements in the `pwg:` namespace — getting that right is what makes the scan
+  actually come through.
+- `POST /eSCL/ScanJobs` — macOS posts a `ScanSettings` (resolution, colour mode,
+  format, and a crop region in eSCL's 1/300-inch units, mapped to our `region`
+  coords); the bridge starts the scan and returns a job URL.
+- `GET …/ScanJobs/{id}/NextDocument` — blocks through the scan, then returns the
+  JPEG/PDF and `404`s (the flatbed is one page).
+
+Each scan currently pays a full lamp warm-up + calibration (~20 s) before the
+image lands — macOS waits through it. See **To do** for the warm-session speedup.
+
 ## Project layout
 
 | File              | Purpose                                              |
@@ -79,6 +115,7 @@ log to `last_scan_trace.txt` — a diagnostic, off by default.
 | `gui.py`          | Tkinter graphical interface                          |
 | `driver.py`       | USB driver + native scan pipeline                    |
 | `imaging.py`      | Decode raw → image, multi-format export              |
+| `escl_bridge.py`  | eSCL/AirScan bridge → native driverless macOS scanner |
 | `motor_tables.py` | Motor ramp/slope/home tables (generated, byte-exact) |
 | `docs/`           | Reverse-engineering specifications                   |
 
@@ -97,6 +134,18 @@ for. The other listed resolutions (100, 200, 400, 800) are the next native rung
 up, resampled in software (each is exactly ⅔ of a native one). This driver does
 the same: it drives the motor only at a native rung, then LANCZOS-resamples to
 the requested size on export. All resolutions are colour/gray/line-art, 8/16-bit.
+
+## To do
+
+- **Warm-scanner session (speed up the eSCL bridge).** Each scan re-runs the full
+  lamp warm-up + calibration (~20 s). Split the driver into a prepare-once
+  (`warm_up`: init + warmup + calibrate, device left open) and a per-scan pass
+  (`scan_prepared`), so the second and later scans in a session are ~3 s instead of
+  ~20 s. Additive API — the CLI/GUI keep the current cold-scan path. Care points:
+  recalibrate when a scan crosses the ≤600↔1200 res-class boundary, add an idle TTL
+  so cached calibration doesn't drift as the lamp ages, and invalidate the warm
+  state on any USB/motor error. Needs a hardware pass to confirm warm scans match
+  cold ones.
 
 ## License
 
