@@ -8,7 +8,7 @@ meta dict keys: dpi, width, lines, channels, depth, lineart, stride, mode
 """
 import os, struct
 
-# Canon factory colorimetry (CNS24G.ICC "8000F Scanner Reflective")
+# Device colorimetry for reflective mode: scanner RGB -> CIE XYZ.
 _M_SCN = [[0.6360, 0.2783, 0.0361],
           [0.3294, 0.6920, -0.0214],
           [0.0174, -0.0400, 1.1115]]
@@ -250,9 +250,8 @@ def export(raw, meta, out_base, formats):
             if im8 is None: im8 = _crop(to_image(raw, meta, bits=8))
             img = im8
         # Resample to the requested output size. `out_width`/`out_lines` (exact
-        # target dims) are set when the requested dpi is a non-native ScanGear
-        # resolution scanned at the next native rung (e.g. 400 dpi scanned at 600
-        # then resampled ×2/3) - this is how the vendor produces those dpis.
+        # target dims) are set when the requested dpi is not a native rung and was
+        # scanned at the next rung up (e.g. 400 dpi scanned at 600, resampled ×2/3).
         # `downscale` (integer factor) is the older path, still honoured.
         from PIL import Image as _I
         ow = meta.get('out_width'); ol = meta.get('out_lines')

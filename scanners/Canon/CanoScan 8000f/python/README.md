@@ -3,8 +3,8 @@
 A clean-room, pure-Python driver for the **Canon CanoScan 8000F** flatbed
 scanner on Apple Silicon Macs (and any host with libusb). No Canon software, no
 Windows, no emulator — device init, lamp warm-up, calibration, motor control and
-the scan program are all generated from firmware logic recovered by reverse-
-engineering the vendor driver, with a small CLI and GUI on top.
+the scan program are all generated from the hardware's own behaviour, recovered by
+clean-room analysis for interoperability, with a small CLI and GUI on top.
 
 > Not affiliated with or endorsed by Canon. "CanoScan" is a Canon trademark,
 > used here only to identify the hardware this project drives. The driver was
@@ -104,8 +104,14 @@ endpoints and advertising an `_uscan._tcp` Bonjour service so macOS discovers it
 - `GET …/ScanJobs/{id}/NextDocument` — blocks through the scan, then returns the
   JPEG/PDF and `404`s (the flatbed is one page).
 
-Each scan currently pays a full lamp warm-up + calibration (~20 s) before the
-image lands — macOS waits through it. See **To do** for the warm-session speedup.
+The first scan of a session pays a full lamp warm-up; later scans skip it while the
+lamp is still warm (see **Performance** below). Calibration still runs per scan —
+see **To do** for the prepare-once split.
+
+**One process at a time.** The driver takes an exclusive lock for the duration of a
+session, so the bridge and the GUI cannot drive the scanner simultaneously. A job
+that arrives while the other holds it waits briefly, then fails with
+`scanner is in use by pid N` rather than colliding on the USB device.
 
 ## Project layout
 
@@ -135,23 +141,43 @@ computed. The per-resolution decel tail is a reversed window of that same ramp.
 Full derivation and the measured safety envelope are in the module docstring.
 
 The scanner has five **native** hardware resolutions — 75, 150, 300, 600, 1200
-dpi — the only ones the vendor firmware carries motor slope/home-decel tables
-for. The other listed resolutions (100, 200, 400, 800) are the next native rung
-up, resampled in software (each is exactly ⅔ of a native one). This driver does
-the same: it drives the motor only at a native rung, then LANCZOS-resamples to
-the requested size on export. All resolutions are colour/gray/line-art, 8/16-bit.
+dpi — the only ones with motor slope and home-decel tables. The other listed
+resolutions (100, 200, 400, 800) are each exactly ⅔ of a native rung, so they are
+served by driving the motor at the rung above and LANCZOS-resampling to the
+requested size on export. Driving the motor at a non-native rate has no matching
+decel table and would over-run the carriage, so any resolution that is not a rung
+is snapped up to the next one, and anything above 1200 dpi is rejected outright
+rather than reaching the hardware. All resolutions are colour/gray/line-art,
+8/16-bit.
+
+## Performance
+
+Lamp warm-up dominates a cold scan. Measured at 300 dpi, a full pass breaks down as
+roughly 18 s warm-up, 12 s read loop (motor-paced — that part is physics), and ~3 s
+each for init and calibration.
+
+The driver keeps a reference of the lamp's measured output at the settled PWM, so a
+scan that starts while the lamp is still warm skips the settle and the PWM search
+and goes straight to imaging: **~36 s cold, ~19 s warm** at 300 dpi, with output
+indistinguishable from a full warm-up.
+
+The fast path only ever *skips waiting*, never checking. It requires two readings
+taken 0.5 s apart to agree, to be unsaturated, and to match the stored reference;
+the reference is written only by a full warm-up, so it cannot drift by being
+re-derived from itself, and it expires after 15 minutes. Any check that fails falls
+through to the full warm-up. Set `WARM_LAMP_FASTPATH = False` at the top of
+`driver.py` to disable it.
 
 ## To do
 
-- **Warm-scanner session (speed up the eSCL bridge).** Each scan re-runs the full
-  lamp warm-up + calibration (~20 s). Split the driver into a prepare-once
-  (`warm_up`: init + warmup + calibrate, device left open) and a per-scan pass
-  (`scan_prepared`), so the second and later scans in a session are ~3 s instead of
-  ~20 s. Additive API — the CLI/GUI keep the current cold-scan path. Care points:
-  recalibrate when a scan crosses the ≤600↔1200 res-class boundary, add an idle TTL
-  so cached calibration doesn't drift as the lamp ages, and invalidate the warm
-  state on any USB/motor error. Needs a hardware pass to confirm warm scans match
-  cold ones.
+- **Prepare-once session (speed up the eSCL bridge).** Every scan still re-runs
+  init and calibration (~6 s combined). Split the driver into a prepare-once
+  (`warm_up`: init + calibrate, device left open) and a per-scan pass
+  (`scan_prepared`). Additive API — the CLI/GUI keep the current cold-scan path.
+  Care points: recalibrate when a scan crosses the ≤600↔1200 res-class boundary,
+  add an idle TTL so cached calibration doesn't drift as the lamp ages, and
+  invalidate the warm state on any USB/motor error. Needs a hardware pass to
+  confirm prepared scans match cold ones.
 
 ## License
 
