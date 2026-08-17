@@ -22,6 +22,10 @@ clean-room analysis for interoperability, with a small CLI and GUI on top.
 Colour uses the scanner's factory colorimetry; calibration runs fresh on every
 scan, so whites stay neutral as the lamp ages.
 
+**Reflective (flatbed) scanning only.** The transparency unit in the lid — film
+strips and slides — is **not supported yet**: `--mode` covers reflective colour,
+gray and line-art, and there is no film or TPU source.
+
 ## Install
 
 ```
