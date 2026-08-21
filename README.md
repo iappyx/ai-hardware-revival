@@ -12,7 +12,7 @@ runtime, no Windows, no emulator, no virtual machine.
 | Device | Status | Where |
 |---|---|---|
 | **CanoScan 8000F** flatbed scanner (USB `04a9:220f`) | **Working** — reflective scanning end-to-end, all resolutions, 8/16-bit, plus a driverless network bridge | [`scanners/Canon/CanoScan 8000f/`](scanners/Canon/CanoScan%208000f/) |
-| **imageFORMULA P-208** portable sheet-fed scanner (USB `1083:164c`) | **Working** — duplex batch feeding end-to-end, all resolutions, plus a driverless network bridge | [`scanners/Canon/imageFORMULA P-208/`](scanners/Canon/imageFORMULA%20P-208/) |
+| **imageFORMULA P-208** portable sheet-fed scanner (USB `1083:164c`) | **Working** — duplex batch feeding end-to-end, all resolutions, a driverless network bridge, and an Android app | [`scanners/Canon/imageFORMULA P-208/`](scanners/Canon/imageFORMULA%20P-208/) |
 
 ## CanoScan 8000F
 
@@ -52,6 +52,8 @@ pure Python:
 - PNG, TIFF, JPEG, PDF
 - An **eSCL / AirScan bridge**, so the scanner appears in macOS Image Capture,
   Preview and iOS as a driverless network scanner with nothing installed
+- An **Android app** that drives the scanner straight from a phone over USB-C —
+  no computer in the loop, and no powered hub needed
 
 Calibration is per unit rather than per model: the scanner carries a correction
 table measured for it at the factory, which the driver reads out of the device
@@ -65,7 +67,8 @@ No SANE backend for this one yet.
 
 → [Device overview](scanners/Canon/imageFORMULA%20P-208/README.md) ·
   [Driver, CLI and GUI](scanners/Canon/imageFORMULA%20P-208/python/README.md) ·
-  [eSCL bridge](scanners/Canon/imageFORMULA%20P-208/python/escl/README.md)
+  [eSCL bridge](scanners/Canon/imageFORMULA%20P-208/python/escl/README.md) ·
+  [Android app](scanners/Canon/imageFORMULA%20P-208/android/README.md)
 
 ## Licence
 
