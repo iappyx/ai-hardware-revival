@@ -1,6 +1,6 @@
 # CanoScan 8000F
 
-A clean-room revival of the CanoScan 8000F flatbed scanner (USB `04a9:220f`),
+An independent revival of the CanoScan 8000F flatbed scanner (USB `04a9:220f`),
 running natively on modern machines. Device init, lamp warm-up, AFE calibration,
 motor control, the scan program and image decode are all implemented from
 scratch.
@@ -38,5 +38,5 @@ strips and slides, using the lamp in the lid — is **not supported yet**.
 ---
 
 Not affiliated with or endorsed by Canon. "CanoScan" is a Canon trademark, used
-only to identify the hardware this project drives. Produced by clean-room analysis
-for interoperability.
+only to identify the hardware this project drives. Written from independent
+analysis of the hardware, for interoperability.
