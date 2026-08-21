@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Canon imageFORMULA P-208: VID 0x1083 (4227), PID 0x164c (5708).
+     0x164e (5710) is the same unit with Auto Start ON - a USB stick, not a
+     scanner - so it is listed too, purely to launch the app and explain that. -->
+<resources>
+    <usb-device vendor-id="4227" product-id="5708" />
+    <usb-device vendor-id="4227" product-id="5710" />
+</resources>
