@@ -146,6 +146,8 @@ class App:
         self.dither = tk.BooleanVar(value=False)
         self.page_size = tk.StringVar(value='auto')
         self.autosize = tk.BooleanVar(value=True)
+        self.continuous = tk.BooleanVar(value=False)
+        self.pdf_quality = tk.StringVar(value=imaging.DEFAULT_PDF_QUALITY)
         self.mode = tk.StringVar(value='color')
         self.fmt = tk.StringVar(value='png')
         self.basename = tk.StringVar(value='scan')
@@ -209,6 +211,7 @@ class App:
         section('Page')
         check('Trim to sheet', self.crop)
         check('Scanner detects size', self.autosize)
+        check('Stack as one long image', self.continuous)
         combo('Size', self.page_size,
               ('auto',) + tuple(sorted(imaging.PAGE_SIZES)), 12)
         check('Straighten', self.deskew)
@@ -242,6 +245,10 @@ class App:
             row=self._r, column=1, columnspan=2, sticky='e', pady=3)
         self._r += 1
         combo('Format', self.fmt, FORMATS, 8)
+        # Only meaningful for PDF; black-and-white pages are lossless whatever
+        # this says, because they cannot be compressed lossily at all.
+        combo('PDF quality', self.pdf_quality,
+              ('max', 'high', 'balanced', 'small'), 10)
         dest = tk.Frame(inner, bg=PANEL)
         dest.grid(row=self._r, column=0, columnspan=3, sticky='ew', pady=(3, 0))
         dest.columnconfigure(0, weight=1)
@@ -325,7 +332,7 @@ class App:
         bitonal, deskew = self.bitonal.get(), self.deskew.get()
         curve, tone = self.light_curve.get(), self.tone.get()
         drop = {'none': 0, 'red': 1, 'green': 2, 'blue': 3}[self.dropout.get()]
-        autosz = self.autosize.get()
+        autosz, cont = self.autosize.get(), self.continuous.get()
         bright, contr = int(self.brightness.get()), int(self.contrast.get())
         gam, rot = float(self.gamma.get()), int(self.rotate.get())
         dith, psize = self.dither.get(), self.page_size.get()
@@ -341,6 +348,8 @@ class App:
                 for imgs in s.scan_batch(dpi=dpi, duplex=duplex, mode=mode,
                                          light_curve=curve,
                                          dropout=(drop, drop),
+                                         autosize=autosz,
+                                         continuous=cont,
                                          on_preview=self.on_preview):
                     pages.append(imgs)
                     self.q.put(('status', '%d sheet(s)...' % len(pages)))
@@ -396,6 +405,7 @@ class App:
         try:
             if fmt == 'pdf':
                 path = imaging.save_pdf(flat, os.path.join(d, base + '.pdf'),
+                                        quality=self.pdf_quality.get(),
                                         dpi=self.dpi.get())
                 self.say('saved %s (%d page(s))' % (path, len(flat)))
                 return

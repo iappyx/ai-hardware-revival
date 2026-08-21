@@ -126,6 +126,7 @@ class P208:
         self.enhance = (0, 0)         # colour emphasis, the exclusive partner
         self.scan_dpi_y = None        # vertical dpi, when it differs from x
         self.autosize = True          # let the device detect the page size
+        self.continuous = False       # stream the whole stack as ONE image
 
     # ---- connection ------------------------------------------------------
 
@@ -1070,13 +1071,20 @@ class P208:
         return page
 
     def _feed_flags(self, base=None):
-        """The page 0x32 feed byte, honouring `autosize`.
+        """The page 0x32 feed byte, honouring `continuous` and `autosize`.
 
-        Automatic page-size detection is the caller's choice, so 0x20 goes on
-        only when it is asked for. Both bits used to be hardcoded on every
-        scan.
+        0x40 makes the device stream the ENTIRE stack as one unbroken image: it
+        never marks a sheet boundary, so eight sheets arrive as one enormous
+        page. Measured with the bit set, a single sheet ran past 26 inches and
+        was still going; with it clear the device ended the sheet by itself at
+        12.98 in. It is therefore off unless the caller explicitly wants one
+        long image, and `scan_batch` opens a session per sheet instead.
         """
-        flags = self.FEED_CONTINUOUS if base is None else base
+        flags = 0 if base is None else base
+        if self.continuous:
+            flags |= self.FEED_CONTINUOUS
+        else:
+            flags &= ~self.FEED_CONTINUOUS
         if self.autosize:
             flags |= self.FEED_AUTOSIZE
         else:
@@ -1484,19 +1492,27 @@ class P208:
     def scan_batch(self, dpi=300, duplex=False, calibrate=True,
                    max_pages=100, mode='color', light_curve=True,
                    curve_normalize=False, dropout=(0, 0), on_preview=None,
-                   autosize=True, enhance=(0, 0)):
+                   autosize=True, enhance=(0, 0), continuous=False):
         """Feed sheets until the tray empties, yielding one list of images per
         sheet (front first).
 
         Calibration runs once for the whole batch, not per sheet - the operating
         point does not change between pages, and re-deriving it would add several
         seconds to every sheet.
+
+        Each sheet gets its OWN scan session. The device offers a continuous
+        mode that streams the whole stack instead, but it never marks a sheet
+        boundary, so the stack arrives as a single enormous image. Set
+        `continuous=True` when that is what you want - a long receipt, or a
+        document meant to stay in one piece - and one page is yielded for the
+        entire stack.
         """
         import numpy as np
 
         self.dropout = tuple(dropout)
         self.autosize = bool(autosize)
         self.enhance = tuple(enhance)
+        self.continuous = bool(continuous)
         mode = self._reduce_mode(mode)
         out_mode = self._out_mode(mode)
         want = dpi
@@ -1522,17 +1538,34 @@ class P208:
                                    out_mode=out_mode)
 
         sides = (self.SIDE_FRONT, self.SIDE_BACK) if duplex else (self.SIDE_FRONT,)
-        # One SCAN opens a session for the whole stack; sheets are separated
-        # inside it by OBJECT POSITION. The device rejects a second SCAN, and
-        # rejects SET WINDOW once a session is open, so both happen once here.
-        self.prepare(dpi=dpi, duplex=duplex, full=False, mode=mode)
-        self.wait_ready()
-        self.scan_start(sides)
-        self.request_sense()
-
         peek = self._previewer(on_preview, refs, dpi, duplex, out_mode)
 
+        # In continuous mode one SCAN covers the whole stack, so the session is
+        # opened once here. Otherwise each sheet gets its own, which is what
+        # gives the device somewhere to end a page: re-issuing SCAN and SET
+        # WINDOW per sheet is accepted, and each sheet then finishes on its own
+        # (measured: 12.41, 12.70 and 12.65 in for three sheets, then SCAN
+        # reports an empty feeder).
+        if self.continuous:
+            self.prepare(dpi=dpi, duplex=duplex, full=False, mode=mode)
+            self.wait_ready()
+            self.scan_start(sides)
+            self.request_sense()
+
         for page in range(max_pages):
+            if not self.continuous:
+                try:
+                    self.prepare(dpi=dpi, duplex=duplex, full=False, mode=mode)
+                    self.wait_ready()
+                    self.scan_start(sides)
+                    self.request_sense()
+                except NoMedium:
+                    return                      # the stack is finished
+                except ScannerError as e:
+                    if 'no documents' in str(e) or 'medium' in str(e):
+                        return
+                    raise
+
             if not self._feed_next():
                 return
 
@@ -1607,6 +1640,13 @@ class P208:
             pages = self._decode(raw, refs, dpi=dpi, duplex=duplex,
                                  mode=out_mode)
             yield [imaging.rescale_xy(p, fx, fy) for p in pages]
+
+            if not self.continuous:
+                # Close this sheet's session before opening the next one.
+                try:
+                    self.object_position(0)
+                except Exception:
+                    self.clear_halts()
 
     def _previewer(self, on_preview, refs, dpi, duplex, mode):
         """Wrap a caller's preview callback so it receives pictures, not bytes.

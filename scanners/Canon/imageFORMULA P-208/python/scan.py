@@ -65,6 +65,15 @@ def main():
     ap.add_argument('--no-autosize', action='store_true',
                     help='do not let the scanner detect the page size itself; '
                          'it scans the whole window instead')
+    ap.add_argument('--pdf-quality', default=imaging.DEFAULT_PDF_QUALITY,
+                    help='how hard to compress a PDF: max (lossless), high, '
+                         'balanced, small, or a number from 1 to 100. '
+                         'Black-and-white pages are always lossless. '
+                         '(default: %(default)s)')
+    ap.add_argument('--continuous', action='store_true',
+                    help='scan the whole stack as ONE long image instead of '
+                         'separate pages - for a receipt or a document that '
+                         'should stay in one piece')
     ap.add_argument('--enhance', choices=('none', 'red', 'green', 'blue'),
                     default='none',
                     help='emphasise a colour instead of dropping it - it comes '
@@ -124,6 +133,7 @@ def main():
                       light_curve=not a.no_light_curve,
                       dropout=(DROPOUT[a.dropout], DROPOUT[a.dropout]),
                       autosize=not a.no_autosize,
+                      continuous=a.continuous,
                       enhance=(DROPOUT[a.enhance], DROPOUT[a.enhance]),
                       curve_normalize=a.normalize_curve)
             # The batch path handles one sheet as happily as twenty, stopping
@@ -191,7 +201,8 @@ def main():
 
     flat = [img for page in out for img in page]
     if 'pdf' in formats and len(flat) > 1:
-        path = imaging.save_pdf(flat, '%s.pdf' % a.out, dpi=a.dpi)
+        path = imaging.save_pdf(flat, '%s.pdf' % a.out, dpi=a.dpi,
+                                quality=a.pdf_quality)
         say('  %s  %d page(s)' % (path, len(flat)))
         formats = [f for f in formats if f != 'pdf']
 

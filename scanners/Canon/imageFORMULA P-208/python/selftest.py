@@ -29,6 +29,7 @@ class Fake(P208):
         self.script = list(script)
         self.last_sense, self.last_ili, self.last_info = (0, 0, 0), False, 0
         self.scan_dpi_y, self.dropout, self.autosize = None, (0, 0), True
+        self.continuous = False
         self.fed = 0
 
     def object_position(self, fn):
@@ -115,12 +116,24 @@ def exception_order():
 
 
 def feed_flags():
-    """The calibration page is 0x40 and must stay 0x40. Folding the autosize
-    bit into it made the device refuse SCAN outright."""
+    """Continuous feed (0x40) makes the device stream the whole stack as one
+    unbroken image - it never marks a sheet boundary, so eight sheets arrive as
+    one page. It must stay OFF unless explicitly asked for."""
     s = Fake([])
-    for auto, want in ((True, 0x60), (False, 0x40)):
-        s.autosize = auto
-        check('page scan flags, autosize=%s' % auto, s._feed_flags(0x60), want)
+    cases = (
+        (False, True,  0x20),   # normal: autosize on, continuous off
+        (False, False, 0x00),
+        (True,  True,  0x60),   # one long image, page size still detected
+        (True,  False, 0x40),
+    )
+    for cont, auto, want in cases:
+        s.continuous, s.autosize = cont, auto
+        check('feed flags continuous=%s autosize=%s' % (cont, auto),
+              s._feed_flags(0x60), want)
+
+    s.continuous, s.autosize = False, True
+    check('continuous is off unless asked for',
+          s._feed_flags(0x60) & P208.FEED_CONTINUOUS, 0)
 
 
 def scan_plan():
