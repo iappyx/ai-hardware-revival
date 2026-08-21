@@ -7,6 +7,36 @@ Each device gets an independent driver: the hardware's behaviour is worked out
 from first principles and reimplemented from scratch, so it runs natively — no vendor
 runtime, no Windows, no emulator, no virtual machine.
 
+## Not just as good as it was — better
+
+Reviving old hardware is usually framed as catching up: getting back to what the
+device could do when its drivers were still supported. That is the floor here,
+not the goal.
+
+Once you own the driver, the device stops being frozen at the feature set its
+vendor shipped. A scanner from 2012 predates the phone in your pocket, driverless
+network scanning, and half the file formats people now expect — but none of that
+is a limitation of the *hardware*. It is a limitation of software nobody updated.
+Write the driver yourself and those years of progress become available to a
+machine that was built before any of it existed.
+
+So these devices gain things their manufacturers never offered:
+
+- **A scanner driven from an Android phone.** The imageFORMULA P-208 is
+  bus-powered, so a USB-C phone can supply it unaided. No computer, no vendor
+  software, nothing installed — hardware from 2012 controlled by a device that
+  did not exist when it was designed.
+- **Driverless network scanning.** Both scanners speak eSCL/AirScan through a
+  bridge, so they appear by themselves in macOS Image Capture, Preview, iOS and
+  any Mopria client — a standard published years after the hardware shipped.
+- **Modern output.** PDFs with the image encoding chosen per page, quality
+  settings, and formats the original software never wrote.
+- **Fixes the vendor never made.** Bugs found along the way get fixed rather
+  than lived with, because there is no one else to wait for.
+
+The measure of a revival is not whether the old thing works again. It is whether
+it is now worth using.
+
 ## Devices
 
 | Device | Status | Where |
@@ -72,6 +102,6 @@ No SANE backend for this one yet.
 
 ## Licence
 
-MIT. Not affiliated with or endorsed by any hardware vendor; trademarks are used
+[MIT](LICENSE). Not affiliated with or endorsed by any hardware vendor; trademarks are used
 only to identify the hardware each driver drives. Written from independent
 analysis of the hardware, for interoperability.
