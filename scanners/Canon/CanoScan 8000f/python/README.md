@@ -1,14 +1,14 @@
 # scan8000f
 
-A clean-room, pure-Python driver for the **Canon CanoScan 8000F** flatbed
-scanner on Apple Silicon Macs (and any host with libusb). No Canon software, no
-Windows, no emulator — device init, lamp warm-up, calibration, motor control and
-the scan program are all generated from the hardware's own behaviour, recovered by
-clean-room analysis for interoperability, with a small CLI and GUI on top.
+An independent, pure-Python driver for the **CanoScan 8000F** flatbed scanner
+(USB `04a9:220f`) on Apple Silicon Macs, and any host with libusb. No Windows and
+no emulator — device init, lamp warm-up, calibration, motor control and the scan
+program are all generated from the hardware's own behaviour, with a small CLI and
+GUI on top.
 
 > Not affiliated with or endorsed by Canon. "CanoScan" is a Canon trademark,
 > used here only to identify the hardware this project drives. The driver was
-> produced by clean-room analysis for interoperability.
+> written from independent analysis of the hardware, for interoperability.
 
 ## Features
 
@@ -81,7 +81,7 @@ log to `last_scan_trace.txt` — a diagnostic, off by default.
 (and iOS/Linux) support the eSCL / AirScan protocol out of the box, so once the
 bridge is running the 8000F appears as a normal scanner in **Image Capture,
 Preview, and Printers & Scanners** — with preview, area select and scan — and no
-Canon software or third-party app installed. The "driver" is just this daemon
+third-party app installed. The "driver" is just this daemon
 translating eSCL on one side to `driver.scan()` over USB on the other.
 
 Run it manually (it only serves while the terminal is open — no autostart):
@@ -125,19 +125,19 @@ that arrives while the other holds it waits briefly, then fails with
 | `gui.py`          | Tkinter graphical interface                          |
 | `driver.py`       | USB driver + native scan pipeline                    |
 | `imaging.py`      | Decode raw → image, multi-format export              |
-| `escl_bridge.py`  | eSCL/AirScan bridge → native driverless macOS scanner |
+| `escl/escl_bridge.py` | eSCL/AirScan bridge → native driverless macOS scanner |
 | `motor_tables.py` | Motor ramp/slope/home tables — generated, no vendor data |
 
 
 ## How it works
 
 The scanner has no on-board intelligence; the host programs the ASIC registers
-directly over USB, and this project reconstructs that entire sequence.
+directly over USB, and this project implements that entire sequence.
 
 **Motor control.** The scanner has no motion controller either: the host uploads
 tables of step intervals into the ASIC's SDRAM and the ASIC walks them, firing
 one motor step per entry on a 20.8 ns tick. `motor_tables.py` generates those
-tables from a recovered acceleration law — the carriage accelerates at a
+tables from a derived acceleration law — the carriage accelerates at a
 constant **+20 steps/s per motor step**, i.e. `ns(n) = round(5e7 / (n + 8.2332183))`
 — followed by a phase that is linear in tick space, described by nineteen
 `(slope, run-length)` pairs. Nothing is stored; all 1178 ramp entries are
@@ -185,4 +185,4 @@ through to the full warm-up. Set `WARM_LAMP_FASTPATH = False` at the top of
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](../LICENSE).
