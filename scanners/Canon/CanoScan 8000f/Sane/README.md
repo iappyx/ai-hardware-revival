@@ -161,5 +161,5 @@ Ported stage by stage against the Python reference, each verified before the nex
 | `scan.sh`        | convenience wrapper: scan straight to a PNG         |
 
 Not affiliated with or endorsed by Canon. "CanoScan" is a Canon trademark, used
-only to identify the hardware this backend drives. Produced by clean-room analysis
-for interoperability.
+only to identify the hardware this backend drives. Written from independent
+analysis of the hardware, for interoperability.

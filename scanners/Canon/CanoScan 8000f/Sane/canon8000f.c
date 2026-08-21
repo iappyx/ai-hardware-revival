@@ -1,6 +1,6 @@
 /* SANE backend for the Canon CanoScan 8000F.
  *
- * Clean-room: the scan pipeline is a C transliteration of the reverse-engineered
+ * The scan pipeline is a C transliteration of the reverse-engineered
  * pure-Python driver (driver.py / imaging.py in this project). USB is done with
  * libusb-1.0 directly - the same control/bulk sequences pyusb issues.
  *
